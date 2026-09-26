@@ -1,0 +1,12 @@
+# Python virtuaali ympäristö
+yolov8-env/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# YOLO 
+runs/
+
+# Python tiedostot
+*.pyo
