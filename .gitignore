@@ -10,3 +10,5 @@ runs/
 
 # Python tiedostot
 *.pyo
+
+/node_modules/
