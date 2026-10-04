@@ -12,3 +12,5 @@ runs/
 *.pyo
 
 /node_modules/
+# Sensorin paikalliset asetukset
+sensor/.env
