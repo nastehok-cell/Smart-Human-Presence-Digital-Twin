@@ -12,6 +12,7 @@ def iso_timestamp():
 
 def find_zone(x, y, zones):
     """Palauttaa sen vyöhykkeen id:n jonka sisällä piste on, tai None."""
+
     for zone in zones:
         contour = np.array(zone["polygon"], dtype=np.float32).reshape(-1, 1, 2)
         if cv2.pointPolygonTest(contour, (float(x), float(y)), False) >= 0:
@@ -49,7 +50,7 @@ def build_updates(people, zones):
 
 
 def emit_updates(sio, updates):
-    if not sio.connected:
+    if not getattr(sio, "connected", False):
         return
     for update in updates:
         sio.emit("sensor:update", update)

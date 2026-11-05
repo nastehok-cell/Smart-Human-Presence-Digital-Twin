@@ -2,15 +2,16 @@
 Kameran kalibrointi: kuvan lattiapisteet -> kartan koordinaatit (homografia).
 
 Klikkaa kuvasta vähintään 4 lattiapistettä ja syötä jokaiselle kartan x,y terminaalissa.
-  r = nollaa pisteet, s = tallenna calibration.json, q = lopeta
+  r = nollaa pisteet, s = tallenna calibration{camera_index}.json, q = lopeta
 """
 import json
 import sys
 
 import cv2
 import numpy as np
+import argparse
 
-from common import CALIBRATION_PATH, fetch_map, load_config
+from common import get_calibration_path, fetch_map, load_config
 
 FRAME_WIDTH, FRAME_HEIGHT = 1920, 1080
 
@@ -49,7 +50,7 @@ def draw_points(frame):
                 cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
 
-def save():
+def save(camera_index):
     if len(image_pts) < 4:
         print(f"Need at least 4 points, have {len(image_pts)}")
         return
@@ -64,34 +65,51 @@ def save():
         "map_pts": map_pts,
         "homography": H.tolist(),
     }
-    CALIBRATION_PATH.write_text(json.dumps(data, indent=2))
-    print(f"Saved {CALIBRATION_PATH}")
+    path = get_calibration_path(camera_index)
+    path.write_text(json.dumps(data, indent=2))
+    print(f"Saved {path}")
 
 
 def main():
     global pending_click
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--camera", type=int, default=0)
+    args = parser.parse_args()
+
+    camera_index = args.camera
+
     config = load_config()
+
+    if camera_index not in config["camera_indices"]:
+        sys.exit(
+            f"Camera {camera_index} is not listed "
+            f"in CAMERA_INDICES={config['camera_indices']}"
+        )
 
     floor_map = fetch_map(config["backend_url"])
     print(f"Map size: {floor_map['width']} x {floor_map['height']}")
     print("Zones:", ", ".join(str(z["id"]) for z in floor_map["zones"]))
 
-    cap = cv2.VideoCapture(config["camera_index"])
+    cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
     if not cap.isOpened():
-        sys.exit(f"Camera {config['camera_index']} could not be opened")
+        cap.release()
+        sys.exit(
+            f"Camera {camera_index} could not be opened with DirectShow. "
+            "Check that it is connected and not being used by another app."
+        )
 
-    window_name = "Calibration"
+    ret, frame = cap.read()
+    if not ret:
+        cap.release()
+        sys.exit(f"Camera {camera_index} opened with DirectShow but returned no frame")
+
+    window_name = f"Calibration - Camera {camera_index}"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.setMouseCallback(window_name, click_event)
 
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("Could not read frame")
-            break
-
         draw_points(frame)
         if pending_click is not None:
             cv2.circle(frame, pending_click, 6, (255, 0, 255), -1)
@@ -111,8 +129,13 @@ def main():
             map_pts.clear()
             print("Points reset")
         elif key == ord("s"):
-            save()
+            save(camera_index)
         elif key == ord("q"):
+            break
+
+        ret, frame = cap.read()
+        if not ret:
+            print(f"Could not read frame from camera {camera_index}")
             break
 
     cap.release()
@@ -120,4 +143,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main() 

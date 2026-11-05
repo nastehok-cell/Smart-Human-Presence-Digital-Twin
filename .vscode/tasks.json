@@ -1,0 +1,16 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run presence sensor",
+			"type": "shell",
+			"command": ".\\yolov8-env\\Scripts\\python.exe",
+			"args": [
+				"sensor\\presence_sensor.py"
+			],
+			"isBackground": true,
+			"problemMatcher": [],
+			"group": "build"
+		}
+	]
+}

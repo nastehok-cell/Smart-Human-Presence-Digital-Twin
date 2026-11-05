@@ -14,13 +14,19 @@ CALIBRATION_PATH = SENSOR_DIR / "calibration.json"
 def load_config():
     # .env sensor-kansiosta, ajohakemistosta riippumatta
     load_dotenv(SENSOR_DIR / ".env")
-    return {
-        "backend_url": os.getenv("BACKEND_URL", "http://localhost:3001").rstrip("/"),
+
+    config = {
+        "backend_url": os.getenv("BACKEND_URL", "http://localhost:3000").rstrip("/"),
         "camera_index": int(os.getenv("CAMERA_INDEX", "0")),
+        "camera_indices": [int(x.strip())for x in os.getenv("CAMERA_INDICES", "0").split(",")],
         "send_interval": float(os.getenv("SEND_INTERVAL_SEC", "1.0")),
         "model_path": os.getenv("MODEL_PATH", "yolov8n.pt"),
+        "merge_distance": float(os.getenv("MERGE_DISTANCE", "35")),
     }
+    return config
 
+def get_calibration_path(camera_index):
+    return SENSOR_DIR / f"calibration{camera_index}.json"
 
 def _point(p):
     # Piste voi olla [x, y] tai {"x": .., "y": ..}
