@@ -5,6 +5,7 @@ from pathlib import Path
 
 import requests
 import socketio
+import json
 from dotenv import load_dotenv
 
 SENSOR_DIR = Path(__file__).resolve().parent
@@ -22,6 +23,8 @@ def load_config():
         "send_interval": float(os.getenv("SEND_INTERVAL_SEC", "1.0")),
         "model_path": os.getenv("MODEL_PATH", "yolov8n.pt"),
         "merge_distance": float(os.getenv("MERGE_DISTANCE", "35")),
+        "checkin_zone": json.loads(os.getenv("CHECKIN_ZONE", "[]")),
+        "track_lost_sec": float(os.getenv("TRACK_LOST_SEC", "1.5")),
     }
     return config
 

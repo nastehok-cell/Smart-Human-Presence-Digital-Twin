@@ -16,6 +16,7 @@ from scipy.optimize import linear_sum_assignment
 
 from common import get_calibration_path, SENSOR_DIR, connect_socket, fetch_map, load_config
 from payload import build_updates, emit_updates
+from tracking import TrackManager, emit_tracks, emit_lost
 
 FRAME_WIDTH, FRAME_HEIGHT = 1920, 1080
 
@@ -153,6 +154,9 @@ def main():
         sys.exit("No usable cameras (check indices and calibration files)")
 
     sio = connect_socket(config["backend_url"])
+    tracker = TrackManager(config["checkin_zone"], config["track_lost_sec"])
+    tracker.register(sio)
+    last_tracks_sent = 0.0
 
     last_sent = 0.0
     try:
@@ -182,7 +186,7 @@ def main():
                     camera["size_checked"] = True
 
                 # Vain ihmiset (COCO luokka 0)
-                results = model.track(frame, persist=True, classes=[0], verbose=False)
+                results = model.track(frame, persist=True, classes=[0], tracker="bytetrack.yaml", verbose=False)
                 boxes = results[0].boxes
 
                 feet, confs = [], []
@@ -190,9 +194,16 @@ def main():
                     feet.append(((x1 + x2) / 2, y2))  # laatikon alareunan keskikohta
                     confs.append(conf)
 
+                ids = boxes.id.int().tolist() if boxes.id is not None else [None] * len(feet)
+                print("Tracking IDs:", ids)
+                  
                 map_points = image_to_map(feet, H)
                 people = [(x, y, c) for (x, y), c in zip(map_points, confs)]
                 detections[camera_index] = people
+                tracker.update(
+                    camera_index,
+                    [(tid, x, y) for tid, (x, y) in zip(ids, map_points) if tid is not None],
+                )
 
                 if args.preview:
                     annotated = results[0].plot()
@@ -206,6 +217,12 @@ def main():
             people = merge_cameras(detections, config["merge_distance"])
 
             now = time.monotonic()
+            for key in tracker.pop_lost():
+                emit_lost(sio, key)
+            if not failed and now - last_tracks_sent >= config["send_interval"]:
+                emit_tracks(sio, tracker.snapshot())
+                last_tracks_sent = now
+
             if not failed and now - last_sent >= config["send_interval"]:
                 updates = build_updates(people, zones)
                 emit_updates(sio, updates)
