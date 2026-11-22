@@ -6,6 +6,7 @@ ja jokaisen vyöhykkeen tila lähetetään backendille "sensor:update" -viestin�
 """
 import argparse
 import json
+import os
 import sys
 import time
 
@@ -14,6 +15,7 @@ import numpy as np
 from ultralytics import YOLO
 from scipy.optimize import linear_sum_assignment
 
+from camera_control import CameraController
 from common import get_calibration_path, SENSOR_DIR, connect_socket, fetch_map, load_config
 from payload import build_updates, emit_updates
 from tracking import TrackManager, emit_tracks, emit_lost
@@ -36,6 +38,7 @@ def image_to_map(points, H):
         return []
     pts = np.array(points, dtype=np.float32).reshape(-1, 1, 2)
     return cv2.perspectiveTransform(pts, H).reshape(-1, 2).tolist()
+
 
 def merge_cameras(detections, max_distance):
     clusters = []
@@ -85,6 +88,11 @@ def main():
     parser.add_argument("--preview", action="store_true")
     parser.add_argument("--camera-index", type=int, default=None)
     parser.add_argument("--zones", default=None)
+    parser.add_argument(
+        "--start-allowed",
+        action="store_true",
+        help="Paikalliseen testaukseen: aloittaa luvalla ilman backend-viestiä",
+    )
     args = parser.parse_args()
 
     config = load_config()
@@ -97,11 +105,10 @@ def main():
     if not camera_indices:
         sys.exit("No cameras configured")
 
-
     floor_map = fetch_map(config["backend_url"])
     zones = floor_map["zones"]
     if args.zones:
-        wanted = {z.strip() for z in args.zones.split(",")} 
+        wanted = {z.strip() for z in args.zones.split(",")}
         zones = [z for z in zones if str(z["id"]) in wanted]
         if not zones:
             sys.exit(f"None of the zones {sorted(wanted)} exist on the map")
@@ -111,61 +118,60 @@ def main():
     if not (SENSOR_DIR / model_path).exists() and (SENSOR_DIR.parent / model_path).exists():
         model_path = str(SENSOR_DIR.parent / model_path)
 
-    cameras = {}
-
+    # Valmistellaan kalibroinnit ja mallit, mutta EI avata kameroita ennen lupaa
+    camera_configs = {}
     for camera_index in camera_indices:
-        cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
-
-        if not cap.isOpened():
-            cap.release()
-            print(
-                f"Camera index {camera_index} could not be opened; "
-                "check the index and ensure the camera is connected and not in use."
-            )
-            continue
-
         try:
             H, calib_size = load_calibration(camera_index)
             H_inv = np.linalg.inv(H)
         except (OSError, json.JSONDecodeError, KeyError, ValueError, np.linalg.LinAlgError) as exc:
-            cap.release()
             print(f"Skipping camera {camera_index}: calibration error: {exc}")
             continue
 
-        model = YOLO(model_path)
-
-        window_name = f"Presence sensor {camera_index}"
-        if args.preview:
-            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-
-        cameras[camera_index] = {
-            "cap": cap,
-            "model": model,
+        camera_configs[camera_index] = {
+            "model": YOLO(model_path),
             "H": H,
             "H_inv": H_inv,
             "calib_size": calib_size,
-            "size_checked": False,
-            "window_name": window_name
+            "window_name": f"Presence sensor {camera_index}",
         }
 
-    if not cameras:
+    if not camera_configs:
         sys.exit("No usable cameras (check indices and calibration files)")
 
     sio = connect_socket(config["backend_url"])
     tracker = TrackManager(config["checkin_zone"], config["track_lost_sec"])
     tracker.register(sio)
-    last_tracks_sent = 0.0
 
+    permission_event = os.getenv("CAMERA_PERMISSION_EVENT", "camera:permission")
+    controller = CameraController(
+        camera_configs,
+        frame_width=FRAME_WIDTH,
+        frame_height=FRAME_HEIGHT,
+        on_close=tracker.clear,
+        preview=args.preview,
+    )
+    controller.register(sio, event_name=permission_event)
+
+    if args.start_allowed:
+        controller.set_permission(True)
+    else:
+        print(f"Waiting for camera permission on '{permission_event}'...")
+
+    last_tracks_sent = 0.0
     last_sent = 0.0
     try:
         while True:
+            # Kamera avataan vasta luvalla; kun lupa loppuu, se suljetaan ja lähetys pysähtyy
+            if not controller.sync():
+                time.sleep(0.1)
+                continue
+
             detections = {}
             preview_frames = {}
             failed = set()
 
-            for camera_index, camera in cameras.items():
+            for camera_index, camera in list(controller.active_cameras.items()):
                 cap = camera["cap"]
                 model = camera["model"]
                 H = camera["H"]
@@ -196,7 +202,7 @@ def main():
 
                 ids = boxes.id.int().tolist() if boxes.id is not None else [None] * len(feet)
                 print("Tracking IDs:", ids)
-                  
+
                 map_points = image_to_map(feet, H)
                 people = [(x, y, c) for (x, y), c in zip(map_points, confs)]
                 detections[camera_index] = people
@@ -214,6 +220,11 @@ def main():
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                     preview_frames[camera_index] = annotated
 
+            # Tarkistetaan vielä, ettei lupa loppunut kesken kierroksen ennen lähetystä
+            if not controller.is_permitted:
+                controller.sync()
+                continue
+
             people = merge_cameras(detections, config["merge_distance"])
 
             now = time.monotonic()
@@ -230,15 +241,15 @@ def main():
 
             if args.preview:
                 for camera_index, annotated in preview_frames.items():
-                    cv2.imshow(cameras[camera_index]["window_name"], annotated)
+                    if camera_index in controller.active_cameras:
+                        cv2.imshow(controller.active_cameras[camera_index]["window_name"], annotated)
 
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
     except KeyboardInterrupt:
         pass
     finally:
-        for camera in cameras.values():
-            camera["cap"].release()
+        controller.close_cameras()
         cv2.destroyAllWindows()
         sio.disconnect()
         print("Stopped")
