@@ -18,7 +18,7 @@ from scipy.optimize import linear_sum_assignment
 from camera_control import CameraController
 from common import get_calibration_path, SENSOR_DIR, connect_socket, fetch_map, load_config
 from payload import build_updates, emit_updates
-from tracking import TrackManager, emit_tracks, emit_lost
+from tracking import TrackManager, emit_tracks, emit_lost, emit_person_lost
 
 FRAME_WIDTH, FRAME_HEIGHT = 1920, 1080
 
@@ -140,7 +140,7 @@ def main():
         sys.exit("No usable cameras (check indices and calibration files)")
 
     sio = connect_socket(config["backend_url"])
-    tracker = TrackManager(config["checkin_zone"], config["track_lost_sec"])
+    tracker = TrackManager(config["checkin_zone"], config["track_lost_sec"], config["merge_distance"])
     tracker.register(sio)
 
     permission_event = os.getenv("CAMERA_PERMISSION_EVENT", "camera:permission")
@@ -201,7 +201,6 @@ def main():
                     confs.append(conf)
 
                 ids = boxes.id.int().tolist() if boxes.id is not None else [None] * len(feet)
-                print("Tracking IDs:", ids)
 
                 map_points = image_to_map(feet, H)
                 people = [(x, y, c) for (x, y), c in zip(map_points, confs)]
@@ -228,10 +227,13 @@ def main():
             people = merge_cameras(detections, config["merge_distance"])
 
             now = time.monotonic()
-            for key in tracker.pop_lost():
+            lost, gone = tracker.pop_lost()
+            for key in lost:
                 emit_lost(sio, key)
+            for person_id in gone:
+                emit_person_lost(sio, person_id)
             if not failed and now - last_tracks_sent >= config["send_interval"]:
-                emit_tracks(sio, tracker.snapshot())
+                emit_tracks(sio, tracker.snapshot(), tracker.people())
                 last_tracks_sent = now
 
             if not failed and now - last_sent >= config["send_interval"]:
